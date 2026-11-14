@@ -101,6 +101,14 @@ onMounted(async () => {
         bronze_pending_after={{ last.report?.bronze_pending_count_after }}
         canonical_after={{ last.report?.canonical_count_after }}
       </p>
+      <p class="mono muted">
+        candidate_ids={{ (last.report?.candidate_row_ids || []).join(',') || '—' }}
+        success_ids={{ (last.report?.success_row_ids || []).join(',') || '—' }}
+        failure_ids={{ (last.report?.failure_row_ids || []).join(',') || '—' }}
+      </p>
+      <p class="mono muted" v-if="last.report?.zone_check">
+        zone_check={{ JSON.stringify(last.report.zone_check) }}
+      </p>
       <p class="muted">{{ last.report?.message }}</p>
 
       <div v-if="last.report?.failure_summary?.length">

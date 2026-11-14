@@ -32,8 +32,8 @@ def insert_row(
     source_id: int,
     item: dict[str, Any],
     disposition: str,
-) -> None:
-    conn.execute(
+) -> int:
+    cur = conn.execute(
         """
         INSERT INTO bronze_rows(
             run_id, source_id, business_key, title, price, category,
@@ -53,6 +53,7 @@ def insert_row(
             disposition,
         ),
     )
+    return int(cur.lastrowid)
 
 
 def list_rows(

@@ -17,9 +17,10 @@ docker compose up --build
 
 配置源与夹具 → 触发 Run → 解析 / 去重 / 冲突隔离 → **Bronze 待晋升区** → 对账闸 → **Canonical（Silver）**
 
-- 摄取报告（Run report）记录 `bronze_candidate_count` 与 `bronze_business_keys`；尚未晋升的行只存在于 Bronze。
-- 晋升台（`POST /api/promotions`）对选定批次或全部待晋升行做对账：条数与业务键多重集必须与摄取报告一致，才整批写 Canonical 并标记 `promoted`。
-- 对账失败时整批保留在 Bronze，`failure_reason` 逐行落库；晋升批次报告持久化在 `promotion_batches`，刷新后仍可查看。
+- 摄取报告（Run report）记录 `bronze_candidate_count`、`bronze_business_keys` 与 `bronze_row_ids`；尚未晋升的行只存在于 Bronze，Canonical 在晋升闸通过前保持为空。
+- 晋升台（`POST /api/promotions`）对选定批次或全部待晋升行做对账：条数、业务键多重集与行 id 必须与摄取报告一致，才整批写 Canonical 并标记 `promoted`。
+- 对账失败时整批保留在 Bronze 且 `failure_reason` 逐行落库，`success_count=0 / failure_count=候选数`，绝不出现「行已消失却报成功」；写入阶段异常则整体回滚后同样回留待晋升区。失败批次报告持久化在 `promotion_batches`，刷新后仍可查看。
+- 成功写完后会同两区自检（`report.zone_check`）：每个业务键在 Canonical 的 revision 必须等于该批获胜候选，且不得有候选行仍留在 pending。
 - 两区列表：待晋升区（`/bronze`，`GET /api/bronze`）与正式主数据（`/canonical`，`GET /api/canonical`）。
 
 ## 种子说明

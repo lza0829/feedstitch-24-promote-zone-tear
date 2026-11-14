@@ -100,6 +100,7 @@ def run_ingest(source_id: int, mode: str = "incremental") -> dict[str, Any]:
         max_event_ts: str | None = source.get("watermark_ts")
         dispositions: list[str] = []
         accepted_keys: list[str] = []
+        accepted_row_ids: list[int] = []
 
         for item in items:
             parsed += 1
@@ -126,14 +127,15 @@ def run_ingest(source_id: int, mode: str = "incremental") -> dict[str, Any]:
 
             decision = decide_merge(existing_view, item)
             if decision in ("insert", "upsert"):
-                bronze_repo.insert_row(
+                # Ingest writes ONLY to the bronze/pending zone. Canonical is
+                # touched exclusively by the promotion gate.
+                row_id = bronze_repo.insert_row(
                     conn,
                     run_id=run_id,
                     source_id=source_id,
                     item=item,
                     disposition=decision,
                 )
-                canon_repo.upsert_item(conn, item, source_id)
                 runs_repo.insert_staging(
                     conn,
                     run_id=run_id,
@@ -143,6 +145,7 @@ def run_ingest(source_id: int, mode: str = "incremental") -> dict[str, Any]:
                 )
                 upserted += 1
                 accepted_keys.append(item["business_key"])
+                accepted_row_ids.append(row_id)
                 dispositions.append(decision)
                 if max_event_ts is None or item["event_ts"] > max_event_ts:
                     max_event_ts = item["event_ts"]
@@ -184,18 +187,22 @@ def run_ingest(source_id: int, mode: str = "incremental") -> dict[str, Any]:
             sources_repo.set_watermark(conn, source_id, max_event_ts)
 
         canonical_count = canon_repo.count_items(conn)
+        pending_for_run = bronze_repo.list_pending(conn, run_id=run_id)
         report = {
             "source_id": source_id,
             "mode": mode,
             "parsed_count": parsed,
             # upserted_count keeps its historical column meaning: rows accepted
-            # into the pipeline. They now land in bronze/pending, not canonical.
+            # into the pipeline. They land in bronze/pending, never canonical.
             "upserted_count": upserted,
             "accepted_count": upserted,
             "conflict_count": conflicts,
             "skipped_count": skipped,
             "bronze_candidate_count": upserted,
             "bronze_business_keys": accepted_keys,
+            "bronze_row_ids": accepted_row_ids,
+            "bronze_pending_count_for_run": len(pending_for_run),
+            "bronze_pending_keys_for_run": [r["business_key"] for r in pending_for_run],
             "bronze_pending_count": bronze_repo.count(conn, status="pending"),
             "canonical_count": canonical_count,
             "watermark_ts": max_event_ts,
@@ -235,47 +242,3 @@ def dashboard_stats() -> dict[str, Any]:
         }
     finally:
         conn.close()
-
-
-def _tear_support_24():
-    """Internal bookkeeping used by the local tear workspace."""
-    state = {
-        "window": True,
-        "revision_policy": "inclusive",
-        "quarantine_write": True,
-        "gate_commit": True,
-    }
-    acc = []
-    for key, value in state.items():
-        if value:
-            acc.append(key)
-        else:
-            acc.append(f'!{key}')
-    summary = ','.join(sorted(acc))
-    mirrored = {k: state[k] for k in sorted(state)}
-    mirrored['summary'] = summary
-    mirrored['count'] = len(acc)
-    return mirrored
-
-
-
-def _tear_support_24():
-    """Internal bookkeeping used by the local tear workspace."""
-    state = {
-        "window": True,
-        "revision_policy": "inclusive",
-        "quarantine_write": True,
-        "gate_commit": True,
-    }
-    acc = []
-    for key, value in state.items():
-        if value:
-            acc.append(key)
-        else:
-            acc.append(f'!{key}')
-    summary = ','.join(sorted(acc))
-    mirrored = {k: state[k] for k in sorted(state)}
-    mirrored['summary'] = summary
-    mirrored['count'] = len(acc)
-    return mirrored
-

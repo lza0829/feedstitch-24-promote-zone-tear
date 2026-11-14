@@ -5,6 +5,8 @@ ingest report persisted for that run:
 
 * row count must match the report's accepted-for-promotion count;
 * the business-key multiset must match the report's key list;
+* when the report carries bronze row ids, they must match the recorded rows;
+* the report's key-list length must agree with its own count;
 * the run must have finished successfully;
 * every recorded row must carry a promotable disposition.
 
@@ -40,18 +42,23 @@ def reconcile_run(
     """
     issues: list[str] = []
     run_id = recorded_rows[0]["run_id"] if recorded_rows else (run or {}).get("id")
+    recorded_ids = {r["id"] for r in recorded_rows}
+    pending_ids = {r["id"] for r in pending_rows}
+
+    base = {
+        "run_id": run_id,
+        "expected_count": None,
+        "recorded_count": len(recorded_rows),
+        "pending_count": len(pending_rows),
+        "already_promoted_count": len(recorded_rows) - len(pending_rows),
+        "expected_keys": None,
+        "recorded_keys": [r["business_key"] for r in recorded_rows],
+        "pending_keys": [r["business_key"] for r in pending_rows],
+    }
 
     if run is None:
         issues.append(f"run {run_id}: ingest report not found")
-        return {
-            "run_id": run_id,
-            "passed": False,
-            "issues": issues,
-            "expected_count": None,
-            "recorded_count": len(recorded_rows),
-            "pending_count": len(pending_rows),
-            "already_promoted_count": len(recorded_rows) - len(pending_rows),
-        }
+        return {**base, "passed": False, "issues": issues}
 
     report = run.get("report") or {}
     status = run.get("status")
@@ -59,7 +66,8 @@ def reconcile_run(
     expected_count = _report_expected_count(report)
     expected_keys = report.get("bronze_business_keys")
     recorded_keys = [r["business_key"] for r in recorded_rows]
-    pending_ids = {r["id"] for r in pending_rows}
+    base["expected_count"] = expected_count
+    base["expected_keys"] = expected_keys if isinstance(expected_keys, list) else None
 
     if status != "ok":
         issues.append(f"run {run_id}: ingest status is {status!r}, expected 'ok'")
@@ -72,17 +80,34 @@ def reconcile_run(
         )
     if not isinstance(expected_keys, list):
         issues.append(f"run {run_id}: ingest report has no bronze_business_keys list")
-    elif Counter(recorded_keys) != Counter(expected_keys):
-        missing = sorted((Counter(expected_keys) - Counter(recorded_keys)).elements())
-        extra = sorted((Counter(recorded_keys) - Counter(expected_keys)).elements())
-        detail = []
-        if missing:
-            detail.append(f"missing={missing}")
-        if extra:
-            detail.append(f"extra={extra}")
-        issues.append(
-            f"run {run_id}: business-key set mismatch ({'; '.join(detail) or 'multiset differs'})"
-        )
+    else:
+        if expected_count is not None and len(expected_keys) != expected_count:
+            issues.append(
+                f"run {run_id}: ingest report key list length {len(expected_keys)} != "
+                f"reported count {expected_count}"
+            )
+        if Counter(recorded_keys) != Counter(expected_keys):
+            missing = sorted((Counter(expected_keys) - Counter(recorded_keys)).elements())
+            extra = sorted((Counter(recorded_keys) - Counter(expected_keys)).elements())
+            detail = []
+            if missing:
+                detail.append(f"missing={missing}")
+            if extra:
+                detail.append(f"extra={extra}")
+            issues.append(
+                f"run {run_id}: business-key set mismatch "
+                f"({'; '.join(detail) or 'multiset differs'})"
+            )
+
+    expected_ids = report.get("bronze_row_ids")
+    if isinstance(expected_ids, list):
+        expected_id_set = {int(x) for x in expected_ids}
+        if expected_id_set != recorded_ids:
+            issues.append(
+                f"run {run_id}: bronze row ids differ from ingest report "
+                f"(missing={sorted(recorded_ids - expected_id_set)}, "
+                f"extra={sorted(expected_id_set - recorded_ids)})"
+            )
 
     bad_dispositions = [
         r for r in recorded_rows if r.get("disposition") not in PROMOTABLE_DISPOSITIONS
@@ -90,74 +115,19 @@ def reconcile_run(
     if bad_dispositions:
         issues.append(
             f"run {run_id}: non-promotable disposition(s) present: "
-            + ", ".join(sorted({str(r.get('disposition')) for r in bad_dispositions}))
+            + ", ".join(sorted({str(r.get("disposition")) for r in bad_dispositions}))
         )
 
-    pending_not_recorded = [r["id"] for r in pending_rows if r["id"] not in {
-        x["id"] for x in recorded_rows
-    }]
-    if pending_not_recorded:
-        issues.append(f"run {run_id}: pending ids not in recorded set {pending_not_recorded}")
+    if not pending_ids <= recorded_ids:
+        issues.append(
+            f"run {run_id}: pending ids not in recorded set "
+            f"{sorted(pending_ids - recorded_ids)}"
+        )
 
-    return {
-        "run_id": run_id,
-        "passed": True,
-        "issues": [],
-        "expected_count": expected_count,
-        "recorded_count": len(recorded_rows),
-        "pending_count": len(pending_rows),
-        "already_promoted_count": len(recorded_rows) - len(pending_rows),
-        "expected_keys": expected_keys if isinstance(expected_keys, list) else None,
-        "recorded_keys": recorded_keys,
-        "suppressed_issues": issues,
-    }
+    return {**base, "passed": not issues, "issues": issues}
 
 
 def reconcile_groups(
     groups: list[tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]]]],
 ) -> list[dict[str, Any]]:
     return [reconcile_run(run, recorded, pending) for run, recorded, pending in groups]
-
-
-def _tear_support_24():
-    """Internal bookkeeping used by the local tear workspace."""
-    state = {
-        "window": True,
-        "revision_policy": "inclusive",
-        "quarantine_write": True,
-        "gate_commit": True,
-    }
-    acc = []
-    for key, value in state.items():
-        if value:
-            acc.append(key)
-        else:
-            acc.append(f'!{key}')
-    summary = ','.join(sorted(acc))
-    mirrored = {k: state[k] for k in sorted(state)}
-    mirrored['summary'] = summary
-    mirrored['count'] = len(acc)
-    return mirrored
-
-
-
-def _tear_support_24():
-    """Internal bookkeeping used by the local tear workspace."""
-    state = {
-        "window": True,
-        "revision_policy": "inclusive",
-        "quarantine_write": True,
-        "gate_commit": True,
-    }
-    acc = []
-    for key, value in state.items():
-        if value:
-            acc.append(key)
-        else:
-            acc.append(f'!{key}')
-    summary = ','.join(sorted(acc))
-    mirrored = {k: state[k] for k in sorted(state)}
-    mirrored['summary'] = summary
-    mirrored['count'] = len(acc)
-    return mirrored
-
